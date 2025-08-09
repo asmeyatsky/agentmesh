@@ -11,12 +11,14 @@ import uuid
 # 1. Define Commands
 @dataclass
 class CreateAccount(Command):
+    tenant_id: str
     account_id: str
     initial_balance: float
 
 
 @dataclass
 class CreditAccount(Command):
+    tenant_id: str
     account_id: str
     amount: float
 
@@ -81,30 +83,44 @@ class BankAccountCommandHandler(CommandHandler):
         if isinstance(command, CreateAccount):
             account = BankAccount(command.account_id)
             account.create(command.initial_balance)
-            self.event_store.save_events(account.account_id, account.changes)
+            self.event_store.save_events(
+                command.tenant_id, account.account_id, account.changes
+            )
         elif isinstance(command, CreditAccount):
-            events = self.event_store.load_events(command.account_id)
+            events = self.event_store.load_events(
+                command.tenant_id, command.account_id
+            )
             account = BankAccount(command.account_id)
             account.load_from_history(events)
             account.credit(command.amount)
-            self.event_store.save_events(account.account_id, account.changes)
+            self.event_store.save_events(
+                command.tenant_id, account.account_id, account.changes
+            )
 
 
 # 5. Define Read Model and Event Handler
 class BankAccountReadModel:
     def __init__(self):
-        self.accounts: dict[str, float] = {}
+        self.accounts: dict[str, dict[str, float]] = {}
+
+    def get_balance(self, tenant_id: str, account_id: str) -> float:
+        return self.accounts.get(tenant_id, {}).get(account_id, 0.0)
 
 
 class BankAccountEventHandler(EventHandler):
     def __init__(self, read_model: BankAccountReadModel):
         self.read_model = read_model
 
-    def handle(self, event: Event):
+    def handle(self, event: Event, tenant_id: str):
+        if tenant_id not in self.read_model.accounts:
+            self.read_model.accounts[tenant_id] = {}
+
         if isinstance(event, AccountCreated):
-            self.read_model.accounts[event.account_id] = event.initial_balance
+            self.read_model.accounts[tenant_id][event.account_id] = (
+                event.initial_balance
+            )
         elif isinstance(event, AccountCredited):
-            self.read_model.accounts[event.account_id] += event.amount
+            self.read_model.accounts[tenant_id][event.account_id] += event.amount
 
 
 def test_cqrs_flow():
@@ -116,23 +132,48 @@ def test_cqrs_flow():
     command_bus.register_handler(CreateAccount, command_handler)
     command_bus.register_handler(CreditAccount, command_handler)
 
-    # Execute commands
-    account_id = "123"
-    command_bus.dispatch(CreateAccount(account_id=account_id, initial_balance=100.0))
-    command_bus.dispatch(CreditAccount(account_id=account_id, amount=50.0))
+    # Execute commands for tenant 1
+    tenant_1_id = "tenant1"
+    account_1_id = "123"
+    command_bus.dispatch(
+        CreateAccount(
+            tenant_id=tenant_1_id, account_id=account_1_id, initial_balance=100.0
+        )
+    )
+    command_bus.dispatch(
+        CreditAccount(tenant_id=tenant_1_id, account_id=account_1_id, amount=50.0)
+    )
 
-    # Verify event store
-    events = event_store.load_events(account_id)
-    assert len(events) == 2
-    assert isinstance(events[0], AccountCreated)
-    assert isinstance(events[1], AccountCredited)
-    assert events[0].initial_balance == 100.0
-    assert events[1].amount == 50.0
+    # Execute commands for tenant 2
+    tenant_2_id = "tenant2"
+    account_2_id = "456"
+    command_bus.dispatch(
+        CreateAccount(
+            tenant_id=tenant_2_id, account_id=account_2_id, initial_balance=200.0
+        )
+    )
+
+    # Verify event store for tenant 1
+    events_t1 = event_store.load_events(tenant_1_id, account_1_id)
+    assert len(events_t1) == 2
+    assert isinstance(events_t1[0], AccountCreated)
+    assert isinstance(events_t1[1], AccountCredited)
+    assert events_t1[0].initial_balance == 100.0
+    assert events_t1[1].amount == 50.0
+
+    # Verify event store for tenant 2
+    events_t2 = event_store.load_events(tenant_2_id, account_2_id)
+    assert len(events_t2) == 1
+    assert isinstance(events_t2[0], AccountCreated)
+    assert events_t2[0].initial_balance == 200.0
 
     # Verify read model
     read_model = BankAccountReadModel()
     event_handler = BankAccountEventHandler(read_model)
-    for event in events:
-        event_handler.handle(event)
+    for event in events_t1:
+        event_handler.handle(event, tenant_1_id)
+    for event in events_t2:
+        event_handler.handle(event, tenant_2_id)
 
-    assert read_model.accounts[account_id] == 150.0
+    assert read_model.get_balance(tenant_1_id, account_1_id) == 150.0
+    assert read_model.get_balance(tenant_2_id, account_2_id) == 200.0

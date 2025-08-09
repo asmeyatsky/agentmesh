@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  agentmesh:
+    build: .
+    container_name: agentmesh
+    volumes:
+      - .:/app
+    depends_on:
+      - nats
+      - postgres
+
+  nats:
+    image: nats:2.9-alpine
+    container_name: nats
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+
+  postgres:
+    image: postgres:13
+    container_name: agentmesh_postgres
+    environment:
+      POSTGRES_DB: agentmesh_db
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:

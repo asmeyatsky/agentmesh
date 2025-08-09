@@ -7,6 +7,7 @@ from agentmesh.mal.load_balancer import IntelligentLoadBalancer
 from agentmesh.security.auth import verify_access_token
 from agentmesh.security.roles import UserRole, has_role
 from jose import JWTError  # Import JWTError for handling authentication failures
+from agentmesh.db.database import SessionLocal, Message # Import SessionLocal and Message
 
 
 class MessageRouter:
@@ -16,6 +17,7 @@ class MessageRouter:
         self.routing_rules = {
             "event_type_A": ["platform1:topic_A", "platform2:topic_B"],
             "event_type_B": ["platform3:topic_C"],
+            "priority_high": ["platform_high:high_priority_topic"], # New rule
         }
         self.tenant_id = tenant_id  # Router's tenant_id
 
@@ -26,6 +28,24 @@ class MessageRouter:
         logger.debug(
             f"Attempting to route message {message.metadata.get('id')} with tenant_id: {message.tenant_id}"
         )
+
+        # Save message to database
+        db = SessionLocal()
+        try:
+            db_message = Message(
+                id=message.metadata.get("id"),
+                tenant_id=message.tenant_id,
+                payload=message.serialize().decode('utf-8') # Store as string
+            )
+            db.add(db_message)
+            db.commit()
+            db.refresh(db_message)
+            logger.info(f"Message {message.metadata.get('id')} saved to database.")
+        except Exception as e:
+            logger.error(f"Failed to save message {message.metadata.get('id')} to database: {e}")
+        finally:
+            db.close()
+
         # Tenant filtering
         if self.tenant_id is not None and message.tenant_id != self.tenant_id:
             logger.warning(
@@ -81,8 +101,22 @@ class MessageRouter:
             )
             return
 
-        # Advanced routing based on message type
+        # Advanced routing based on message type or priority
         message_type = message.metadata.get("type")
+        message_priority = message.metadata.get("priority")
+
+        if message_priority == "high" and "priority_high" in self.routing_rules:
+            targets = self.routing_rules["priority_high"]
+            selected_target = self.load_balancer.select_target(targets)
+            platform, topic = selected_target.split(":", 1)
+            if platform in self.adapters:
+                logger.info(
+                    f"Routing high priority message {message.metadata.get('id')} to {platform}:{topic}"
+                )
+                await self.adapters[platform].send(message, topic)
+                MESSAGES_SENT.labels(platform=platform, topic=topic).inc()
+                return # Message handled by priority rule
+
         if message_type and message_type in self.routing_rules:
             targets = self.routing_rules[message_type]
             selected_target = self.load_balancer.select_target(targets)
@@ -94,12 +128,14 @@ class MessageRouter:
                 await self.adapters[platform].send(message, topic)
                 MESSAGES_SENT.labels(platform=platform, topic=topic).inc()
         else:
-            # Fallback to original routing if no specific rule matches
-            for target in message.routing.get("targets", []):
-                platform, topic = target.split(":", 1)
+            # Fallback to original routing if no specific rule matches, using load balancer
+            targets = message.routing.get("targets", [])
+            if targets:
+                selected_target = self.load_balancer.select_target(targets)
+                platform, topic = selected_target.split(":", 1)
                 if platform in self.adapters:
                     logger.info(
-                        f"Routing message {message.metadata.get('id')} to {platform}:{topic} via direct target"
+                        f"Routing message {message.metadata.get('id')} to {platform}:{topic} via direct target and load balancer"
                     )
                     await self.adapters[platform].send(message, topic)
                     MESSAGES_SENT.labels(platform=platform, topic=topic).inc()
