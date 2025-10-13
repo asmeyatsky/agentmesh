@@ -5,6 +5,8 @@ class UserRole(str, Enum):
     ADMIN = "admin"
     AGENT = "agent"
     OBSERVER = "observer"
+    ORCHESTRATOR = "orchestrator"
+    TASK_EXECUTOR = "task_executor"
 
 
 def has_role(user_roles: list[UserRole], required_roles: list[UserRole]) -> bool:

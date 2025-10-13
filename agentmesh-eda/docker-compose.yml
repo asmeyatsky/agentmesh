@@ -29,5 +29,17 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  api_gateway:
+    build: .
+    container_name: api_gateway
+    command: uvicorn agentmesh.icl.api_gateway:app --host 0.0.0.0 --port 8000
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      - nats
+      - postgres
+
 volumes:
   postgres_data:

@@ -3,6 +3,7 @@ import json
 import os
 import uuid
 from agentmesh.db.database import SessionLocal, Tenant, Message, init_db
+from agentmesh.security.encryption import decrypt_data
 
 app = Flask(__name__)
 
@@ -51,6 +52,12 @@ def messages():
     db = SessionLocal()
     try:
         messages = db.query(Message).all()
+        # Decrypt payload for display
+        for message in messages:
+            try:
+                message.payload = decrypt_data(message.payload.encode('utf-8')).decode('utf-8')
+            except Exception as e:
+                message.payload = f"Decryption Error: {e} (Raw: {message.payload})"
         return render_template("messages.html", messages=messages)
     finally:
         db.close()

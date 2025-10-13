@@ -1,9 +1,11 @@
 from agentmesh.cqrs.event import Event
 from agentmesh.cqrs.command import Command
 from agentmesh.cqrs.handler import CommandHandler
+from agentmesh.cqrs.query import Query # New import
+from agentmesh.cqrs.query_handler import QueryHandler # New import
 from agentmesh.mal.router import MessageRouter
 from agentmesh.mal.message import UniversalMessage
-from typing import Dict, List, Type
+from typing import Dict, List, Type, Any
 from agentmesh.utils.metrics import COMMANDS_DISPATCHED
 
 
@@ -20,15 +22,26 @@ class EventBus:
             await self.router.route_message(message)
 
 
-class CommandBus:
+class CqrsBus: # Renamed from CommandBus
     def __init__(self):
-        self.handlers: Dict[Type[Command], CommandHandler] = {}
+        self.command_handlers: Dict[Type[Command], CommandHandler] = {}
+        self.query_handlers: Dict[Type[Query], QueryHandler] = {} # New attribute
 
-    def register_handler(self, command_type: Type[Command], handler: CommandHandler):
-        self.handlers[command_type] = handler
+    def register_command_handler(self, command_type: Type[Command], handler: CommandHandler): # Renamed method
+        self.command_handlers[command_type] = handler
 
-    def dispatch(self, command: Command):
-        handler = self.handlers.get(type(command))
+    def register_query_handler(self, query_type: Type[Query], handler: QueryHandler): # New method
+        self.query_handlers[query_type] = handler
+
+    def dispatch_command(self, command: Command): # Renamed method
+        handler = self.command_handlers.get(type(command))
         if handler:
             handler.handle(command)
             COMMANDS_DISPATCHED.labels(command_type=type(command).__name__).inc()
+
+    async def dispatch_query(self, query: Query) -> Any: # New method
+        handler = self.query_handlers.get(type(query))
+        if handler:
+            return await handler.handle(query)
+        else:
+            raise ValueError(f"No handler registered for query type: {type(query).__name__}")

@@ -14,11 +14,19 @@ class AgentRegistry:
             del self.agents[agent_id]
 
     def discover_agents(
-        self, requirements: Dict[str, Any], tenant_id: str = None
+        self, requirements: List[str] = None, tenant_id: str = None
     ) -> List[Agent]:
-        # Simple discovery for now, filters by tenant_id if provided
-        if tenant_id:
-            return [
-                agent for agent in self.agents.values() if agent.tenant_id == tenant_id
-            ]
-        return list(self.agents.values())
+        # Discover agents based on capabilities and tenant_id
+        found_agents = []
+        for agent in self.agents.values():
+            if tenant_id and agent.tenant_id != tenant_id:
+                continue  # Skip if tenant_id does not match
+
+            if requirements:
+                # Check if the agent has all required capabilities
+                if all(req in agent.capabilities for req in requirements):
+                    found_agents.append(agent)
+            else:
+                # If no specific requirements, add all agents (after tenant_id filter)
+                found_agents.append(agent)
+        return found_agents

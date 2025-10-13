@@ -9,12 +9,18 @@ The AgentMesh EDA (Event-Driven Architecture) is a comprehensive framework desig
 ### Key Features:
 
 *   **Multi-Tenancy:** Supports isolated operations for multiple tenants, ensuring data and operational segregation.
-*   **Message Abstraction Layer (MAL):** Provides a unified interface for various messaging systems (NATS, Kafka, etc.) with intelligent routing and message persistence.
-*   **Agent Orchestration Layer (AOL):** Manages agent lifecycle, coordination, and supports various multi-agent patterns (Orchestrator-Worker, Hierarchical, Blackboard, Market-Based).
+*   **Message Abstraction Layer (MAL):** Provides a unified interface for various messaging systems (NATS, Kafka, Google Cloud Pub/Sub, etc.) with intelligent routing and message persistence.
+*   **Agent Orchestration Layer (AOL):** Manages agent lifecycle, coordination, and supports various multi-agent patterns (Orchestrator-Worker, Hierarchical, Blackboard, Market-Based, Swarm Intelligence).
+*   **Advanced AI Integration:** Native support for Google Cloud Vertex AI, including Gemini models for enhanced agent reasoning and content generation.
+*   **Federated Learning:** Distributed model training across agents while preserving data privacy.
+*   **AI Safety & Alignment:** Comprehensive safety monitoring, alignment evaluation, and quarantine mechanisms.
+*   **Decentralized Coordination:** Gossip protocols, Raft consensus, and peer-to-peer coordination mechanisms.
 *   **Event Processing Engine (EPE):** Includes components for anomaly detection and performance optimization.
+*   **Intelligent Routing System:** Advanced routing based on agent capabilities, load, context, and historical performance.
 *   **Command Query Responsibility Segregation (CQRS):** Implements CQRS for efficient data handling.
 *   **Robust Tooling:** Features a command-line interface (CLI) for system management and a web-based UI for monitoring.
 *   **Persistent Storage:** Integrates with PostgreSQL for reliable data storage.
+*   **Enterprise Security:** Zero-trust architecture with advanced authentication and authorization mechanisms.
 *   **CI/CD Pipeline:** Basic GitHub Actions workflow for automated build and test.
 
 ## Architecture
@@ -143,6 +149,42 @@ The AgentMesh EDA CLI tool allows you to interact with the system from your term
 
     ```bash
     docker-compose exec -d agentmesh python -m agentmesh.cli.main agent start-kafka-agent kafka-agent-1 --capabilities "kafka-consumer"
+    ```
+
+9.  **Start a Vertex AI Agent:**
+
+    ```bash
+    docker-compose exec -d agentmesh python -m agentmesh.cli.main agent start-vertex-agent vertex-agent-1 --capabilities "ai-reasoning,content-generation" --gcp-project-id "your-project-id" --model-name "text-bison@001"
+    ```
+
+10. **Start a Swarm Orchestrator:**
+
+    ```bash
+    docker-compose exec -d agentmesh python -m agentmesh.cli.main agent start-swarm-orchestrator swarm-orchestrator-1 --capabilities "swarm-coordination,task-management"
+    ```
+
+11. **Start a Swarm Worker Agent:**
+
+    ```bash
+    docker-compose exec -d agentmesh python -m agentmesh.cli.main agent start-swarm-worker swarm-worker-1 --capabilities "data-processing,analysis" --swarm-orchestrator-id "swarm-orchestrator-1"
+    ```
+
+12. **Start a Federated Learning Agent:**
+
+    ```bash
+    docker-compose exec -d agentmesh python -m agentmesh.cli.main agent start-federated-agent federated-agent-1 --capabilities "machine-learning,federated-training"
+    ```
+
+13. **Start a Safety-Aware Agent:**
+
+    ```bash
+    docker-compose exec -d agentmesh python -m agentmesh.cli.main agent start-safety-agent safety-agent-1 --capabilities "safety-monitoring,alignment-check" --agent-type "general"
+    ```
+
+14. **Start a Decentralized Agent:**
+
+    ```bash
+    docker-compose exec -d agentmesh python -m agentmesh.cli.main agent start-decentralized-agent decentralized-agent-1 --capabilities "consensus,coordination" --cluster-nodes "node-1 node-2 node-3"
     ```
 
 ### Using the UI

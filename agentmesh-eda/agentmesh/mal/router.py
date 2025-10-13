@@ -1,5 +1,7 @@
 from agentmesh.mal.message import UniversalMessage
 from agentmesh.mal.adapters.base import MessagePlatformAdapter
+from agentmesh.mal.advanced_router import AdvancedMessageRouter as InternalAdvancedRouter
+from agentmesh.aol.registry import AgentRegistry
 from typing import Dict
 from loguru import logger
 from agentmesh.utils.metrics import MESSAGES_SENT
@@ -8,10 +10,11 @@ from agentmesh.security.auth import verify_access_token
 from agentmesh.security.roles import UserRole, has_role
 from jose import JWTError  # Import JWTError for handling authentication failures
 from agentmesh.db.database import SessionLocal, Message # Import SessionLocal and Message
+from agentmesh.security.encryption import encrypt_data, decrypt_data # Import encryption functions
 
 
 class MessageRouter:
-    def __init__(self, tenant_id: str = None):  # Add tenant_id to router
+    def __init__(self, tenant_id: str = None, use_advanced_routing: bool = False):  # Add tenant_id to router
         self.adapters: Dict[str, MessagePlatformAdapter] = {}
         self.load_balancer = IntelligentLoadBalancer()
         self.routing_rules = {
@@ -19,7 +22,18 @@ class MessageRouter:
             "event_type_B": ["platform3:topic_C"],
             "priority_high": ["platform_high:high_priority_topic"], # New rule
         }
+        self.message_type_roles = {
+            "TaskAssigned": [UserRole.ORCHESTRATOR],
+            # Add other message types and their required roles here
+        }
         self.tenant_id = tenant_id  # Router's tenant_id
+        self.use_advanced_routing = use_advanced_routing
+        self.advanced_router = None  # Will be initialized when needed
+        
+        if use_advanced_routing:
+            # Initialize the advanced router with agent registry
+            registry = AgentRegistry()
+            self.advanced_router = InternalAdvancedRouter(registry)
 
     def add_adapter(self, platform: str, adapter: MessagePlatformAdapter):
         self.adapters[platform] = adapter
@@ -35,7 +49,7 @@ class MessageRouter:
             db_message = Message(
                 id=message.metadata.get("id"),
                 tenant_id=message.tenant_id,
-                payload=message.serialize().decode('utf-8') # Store as string
+                payload=encrypt_data(message.serialize()).decode('utf-8') # Encrypt and store as string
             )
             db.add(db_message)
             db.commit()
@@ -75,12 +89,23 @@ class MessageRouter:
                 f"User roles for message {message.metadata.get('id')}: {user_roles}"
             )
 
-            required_roles = [UserRole.AGENT]  # Example: only agents can send messages
-            if not has_role(user_roles, required_roles):
+            # Check role-based authorization for message type
+            message_type = message.metadata.get("type")
+            required_roles_for_type = self.message_type_roles.get(message_type, [])
+
+            if required_roles_for_type and not has_role(user_roles, required_roles_for_type):
                 logger.warning(
-                    f"Message {message.metadata.get('id')} rejected: User does not have required roles {required_roles}. User roles: {user_roles}"
+                    f"Message {message.metadata.get('id')} rejected: User does not have required roles {required_roles_for_type} for message type {message_type}. User roles: {user_roles}"
                 )
                 return
+
+            # Original agent role check (can be refined or removed if message_type_roles covers all cases)
+            # required_roles = [UserRole.AGENT]  # Example: only agents can send messages
+            # if not has_role(user_roles, required_roles):
+            #     logger.warning(
+            #         f"Message {message.metadata.get('id')} rejected: User does not have required roles {required_roles}. User roles: {user_roles}"
+            #     )
+            #     return
             logger.debug(
                 f"Authorization passed for message {message.metadata.get('id')}"
             )
@@ -100,6 +125,24 @@ class MessageRouter:
                 f"Unexpected error during authentication/authorization for message {message.metadata.get('id')}: {e}"
             )
             return
+
+        # If advanced routing is enabled, use it for intelligent agent selection
+        if self.use_advanced_routing and self.advanced_router:
+            target_agent_id = await self.advanced_router.route_message(message)
+            if target_agent_id:
+                # Route directly to the selected agent
+                logger.info(
+                    f"Advanced routing selected agent {target_agent_id} for message {message.metadata.get('id')}"
+                )
+                
+                # For direct agent routing, we might send to a specific topic
+                # This would depend on the implementation of agent-specific routing
+                # For now, we'll send to a general agent processing topic
+                platform = "nats"  # Default platform for agent routing
+                if platform in self.adapters:
+                    await self.adapters[platform].send(message, f"agent.{target_agent_id}")
+                    MESSAGES_SENT.labels(platform=platform, topic=f"agent.{target_agent_id}").inc()
+                return
 
         # Advanced routing based on message type or priority
         message_type = message.metadata.get("type")

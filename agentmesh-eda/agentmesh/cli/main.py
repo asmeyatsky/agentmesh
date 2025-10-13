@@ -4,87 +4,7 @@ import json
 import os
 import uuid
 from agentmesh.db.database import SessionLocal, engine, Base, Tenant, Message, init_db
-
-# TENANTS_FILE = "tenants.json" # No longer needed
-
-# def get_tenants(): # No longer needed
-#     if not os.path.exists(TENANTS_FILE):
-#         return []
-#     with open(TENANTS_FILE, "r") as f:
-#         return json.load(f)
-
-# def save_tenants(tenants): # No longer needed
-#     with open(TENANTS_FILE, "w") as f:
-#         json.dump(tenants, f, indent=2)
-
-
-def main():
-    init_db() # Initialize the database
-
-    parser = argparse.ArgumentParser(description="AgentMesh EDA CLI Tool")
-    parser.add_argument("--version", action="version", version="AgentMesh EDA 0.1.0")
-    subparsers = parser.add_subparsers(dest="command", help="Available commands")
-
-    # Tenant command
-    tenant_parser = subparsers.add_parser("tenant", help="Manage tenants")
-    tenant_subparsers = tenant_parser.add_subparsers(
-        dest="tenant_command", help="Tenant commands"
-    )
-    tenant_create_parser = tenant_subparsers.add_parser(
-        "create", help="Create a new tenant"
-    )
-    tenant_create_parser.add_argument("name", help="Name of the tenant")
-    tenant_subparsers.add_parser("list", help="List all tenants")
-
-    # Status command
-    subparsers.add_parser("status", help="View system status")
-
-    # Message command
-    message_parser = subparsers.add_parser("message", help="Inspect messages")
-    message_subparsers = message_parser.add_subparsers(
-        dest="message_command", help="Message commands"
-    )
-    message_view_parser = message_subparsers.add_parser(
-        "view", help="View a message by ID"
-    )
-    message_view_parser.add_argument("id", help="ID of the message")
-
-    args = parser.parse_args()
-
-    if args.command == "tenant":
-        db = SessionLocal()
-        try:
-            if args.tenant_command == "create":
-                existing_tenant = db.query(Tenant).filter(Tenant.name == args.name).first()
-                if existing_tenant:
-                    logger.error(f"Tenant with name '{args.name}' already exists.")
-                else:
-                    new_tenant = Tenant(id=str(uuid.uuid4()), name=args.name)
-                    db.add(new_tenant)
-                    db.commit()
-                    db.refresh(new_tenant)
-                    logger.info(f"Tenant '{args.name}' created successfully.")
-            elif args.tenant_command == "list":
-                tenants = db.query(Tenant).all()
-                if not tenants:
-                    logger.info("No tenants found.")
-                else:
-                    for tenant in tenants:
-                        print(tenant.name)
-        finally:
-            db.close()
-
-    elif args.command == "status":
-        # In a real application, this would check the health of the messaging system,
-        # the agent registry, and other components.
-        logger.info("System status: OK")
-    elif args.command == "message":
-        from loguru import logger
-import argparse
-import json
-import os
-import uuid
-from agentmesh.db.database import SessionLocal, engine, Base, Tenant, Message, init_db
+from agentmesh.security.encryption import decrypt_data
 from agentmesh.aol.simple_agent import SimpleAgent
 from agentmesh.mal.adapters.nats import NATSAdapter
 from agentmesh.aol.registry import AgentRegistry
@@ -93,6 +13,15 @@ from agentmesh.aol.orchestrator_agent import OrchestratorAgent
 from agentmesh.mal.router import MessageRouter
 from agentmesh.aol.kafka_agent import KafkaAgent
 from agentmesh.mal.adapters.kafka import KafkaAdapter
+from agentmesh.aol.vertex_agent import VertexAIAgent
+from agentmesh.mal.adapters.vertex_ai import VertexAIAdapter
+from agentmesh.mal.adapters.advanced_pubsub import AdvancedPubSubAdapter
+from agentmesh.aol.swarm_orchestrator import SwarmOrchestrator
+from agentmesh.aol.swarm_worker_agent import SwarmWorkerAgent
+from agentmesh.aol.federated_mesh_agent import FederatedLearningMeshAgent
+from agentmesh.aol.federated_learning import FederatedLearningCoordinator
+from agentmesh.aol.safety_aware_agent import AdvancedSafetyAwareAgent
+from agentmesh.aol.decentralized_agent import DecentralizedAgent
 
 # TENANTS_FILE = "tenants.json" # No longer needed
 
@@ -183,6 +112,69 @@ def main():
     agent_kafka_start_parser.add_argument(
         "--capabilities", nargs='+', help="Capabilities of the agent"
     )
+    
+    agent_vertex_start_parser = agent_subparsers.add_parser(
+        "start-vertex-agent", help="Start a VertexAIAgent"
+    )
+    agent_vertex_start_parser.add_argument("id", help="ID of the agent")
+    agent_vertex_start_parser.add_argument(
+        "--capabilities", nargs='+', help="Capabilities of the agent"
+    )
+    agent_vertex_start_parser.add_argument(
+        "--model-name", default="text-bison@001", help="Vertex AI model name to use"
+    )
+    agent_vertex_start_parser.add_argument(
+        "--gcp-project-id", required=True, help="Google Cloud Project ID"
+    )
+    
+    agent_swarm_orchestrator_parser = agent_subparsers.add_parser(
+        "start-swarm-orchestrator", help="Start a SwarmOrchestrator"
+    )
+    agent_swarm_orchestrator_parser.add_argument("id", help="ID of the orchestrator")
+    agent_swarm_orchestrator_parser.add_argument(
+        "--capabilities", nargs='+', help="Capabilities of the orchestrator"
+    )
+    
+    agent_swarm_worker_parser = agent_subparsers.add_parser(
+        "start-swarm-worker", help="Start a SwarmWorkerAgent"
+    )
+    agent_swarm_worker_parser.add_argument("id", help="ID of the agent")
+    agent_swarm_worker_parser.add_argument(
+        "--capabilities", nargs='+', help="Capabilities of the agent"
+    )
+    agent_swarm_worker_parser.add_argument(
+        "--swarm-orchestrator-id", default="swarm_orchestrator", help="ID of the swarm orchestrator"
+    )
+    
+    agent_federated_parser = agent_subparsers.add_parser(
+        "start-federated-agent", help="Start a FederatedLearningMeshAgent"
+    )
+    agent_federated_parser.add_argument("id", help="ID of the agent")
+    agent_federated_parser.add_argument(
+        "--capabilities", nargs='+', help="Capabilities of the agent"
+    )
+    
+    agent_safety_parser = agent_subparsers.add_parser(
+        "start-safety-agent", help="Start an AdvancedSafetyAwareAgent"
+    )
+    agent_safety_parser.add_argument("id", help="ID of the agent")
+    agent_safety_parser.add_argument(
+        "--capabilities", nargs='+', help="Capabilities of the agent"
+    )
+    agent_safety_parser.add_argument(
+        "--agent-type", default="general", help="Type of agent for alignment purposes"
+    )
+    
+    agent_decentralized_parser = agent_subparsers.add_parser(
+        "start-decentralized-agent", help="Start a DecentralizedAgent"
+    )
+    agent_decentralized_parser.add_argument("id", help="ID of the agent")
+    agent_decentralized_parser.add_argument(
+        "--capabilities", nargs='+', help="Capabilities of the agent"
+    )
+    agent_decentralized_parser.add_argument(
+        "--cluster-nodes", nargs='+', required=True, help="List of cluster node IDs"
+    )
 
     args = parser.parse_args()
 
@@ -221,7 +213,13 @@ def main():
                 if message:
                     logger.info(f"Message ID: {message.id}")
                     logger.info(f"Tenant ID: {message.tenant_id}")
-                    logger.info(f"Payload: {message.payload}")
+                    # Decrypt payload before displaying
+                    try:
+                        decrypted_payload = decrypt_data(message.payload.encode('utf-8')).decode('utf-8')
+                        logger.info(f"Payload: {decrypted_payload}")
+                    except Exception as e:
+                        logger.error(f"Failed to decrypt payload for message {message.id}: {e}")
+                        logger.info(f"Raw Payload: {message.payload}") # Display raw if decryption fails
                 else:
                     logger.warning(f"Message with ID: {args.id} not found.")
         finally:
@@ -269,13 +267,85 @@ def main():
             logger.info(f"KafkaAgent {agent.id} registered with capabilities: {agent.capabilities}")
             import asyncio
             asyncio.run(agent.start())
-    else:
-        parser.print_help()
-
-
-if __name__ == "__main__":
-    main()
-
+        elif args.agent_command == "start-vertex-agent":
+            vertex_adapter = VertexAIAdapter(project_id=args.gcp_project_id)
+            agent = VertexAIAgent(
+                args.id, 
+                args.capabilities or [], 
+                vertex_adapter,
+                model_name=args.model_name
+            )
+            registry = AgentRegistry()
+            registry.register_agent(agent)
+            logger.info(f"VertexAIAgent {agent.id} registered with capabilities: {agent.capabilities}")
+            import asyncio
+            asyncio.run(agent.start())
+        elif args.agent_command == "start-swarm-orchestrator":
+            router = MessageRouter()  # Need a router instance
+            orchestrator = SwarmOrchestrator(
+                args.id, 
+                args.capabilities or [], 
+                router
+            )
+            registry = AgentRegistry()
+            registry.register_agent(orchestrator)
+            logger.info(f"SwarmOrchestrator {orchestrator.id} registered with capabilities: {orchestrator.capabilities}")
+            import asyncio
+            asyncio.run(orchestrator.start())
+        elif args.agent_command == "start-swarm-worker":
+            nats_adapter = NATSAdapter()  # Using NATS as the message adapter
+            agent = SwarmWorkerAgent(
+                args.id, 
+                args.capabilities or [], 
+                nats_adapter,
+                swarm_orchestrator_id=args.swarm_orchestrator_id
+            )
+            registry = AgentRegistry()
+            registry.register_agent(agent)
+            logger.info(f"SwarmWorkerAgent {agent.id} registered with capabilities: {agent.capabilities}")
+            import asyncio
+            asyncio.run(agent.start())
+        elif args.agent_command == "start-federated-agent":
+            nats_adapter = NATSAdapter()  # Using NATS as the message adapter
+            agent = FederatedLearningMeshAgent(
+                args.id, 
+                args.capabilities or [], 
+                nats_adapter
+            )
+            # Create and set up federated learning coordinator
+            coordinator = FederatedLearningCoordinator(f"coordinator_{args.id}")
+            agent.set_coordinator(coordinator)
+            registry = AgentRegistry()
+            registry.register_agent(agent)
+            logger.info(f"FederatedLearningMeshAgent {agent.id} registered with capabilities: {agent.capabilities}")
+            import asyncio
+            asyncio.run(agent.start())
+        elif args.agent_command == "start-safety-agent":
+            nats_adapter = NATSAdapter()  # Using NATS as the message adapter
+            agent = AdvancedSafetyAwareAgent(
+                args.id, 
+                args.capabilities or [], 
+                nats_adapter,
+                agent_type=args.agent_type
+            )
+            registry = AgentRegistry()
+            registry.register_agent(agent)
+            logger.info(f"AdvancedSafetyAwareAgent {agent.id} registered with capabilities: {agent.capabilities}")
+            import asyncio
+            asyncio.run(agent.start())
+        elif args.agent_command == "start-decentralized-agent":
+            nats_adapter = NATSAdapter()  # Using NATS as the message adapter
+            agent = DecentralizedAgent(
+                args.id, 
+                args.capabilities or [], 
+                nats_adapter,
+                cluster_nodes=args.cluster_nodes
+            )
+            registry = AgentRegistry()
+            registry.register_agent(agent)
+            logger.info(f"DecentralizedAgent {agent.id} registered with capabilities: {agent.capabilities}")
+            import asyncio
+            asyncio.run(agent.start())
     else:
         parser.print_help()
 
