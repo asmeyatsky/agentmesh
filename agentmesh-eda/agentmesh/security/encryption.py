@@ -14,6 +14,7 @@ Key Design Decisions:
 4. Support for encrypted payload in UniversalMessage
 """
 
+import threading
 from loguru import logger
 from cryptography.fernet import Fernet, InvalidToken
 from typing import Optional
@@ -95,22 +96,25 @@ class EncryptionService:
             raise
 
 
-# Global encryption service instance
+# Global encryption service instance (thread-safe lazy init)
 _encryption_service: Optional[EncryptionService] = None
+_encryption_lock = threading.Lock()
 
 
 def get_encryption_service() -> EncryptionService:
     """
     Get or initialize global encryption service.
 
-    Uses lazy initialization pattern for dependency injection compatibility.
+    Uses double-checked locking for thread-safe lazy initialization.
 
     Returns:
         Singleton EncryptionService instance
     """
     global _encryption_service
     if _encryption_service is None:
-        _encryption_service = EncryptionService()
+        with _encryption_lock:
+            if _encryption_service is None:
+                _encryption_service = EncryptionService()
     return _encryption_service
 
 

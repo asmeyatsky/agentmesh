@@ -352,11 +352,12 @@ class SecurityMiddleware(BaseHTTPMiddleware):
             if origin not in self.config.allowed_origins:
                 return
             response.headers["Access-Control-Allow-Origin"] = origin
+            if self.config.allow_credentials:
+                response.headers["Access-Control-Allow-Credentials"] = "true"
         else:
+            # No allowed_origins configured — only allow without credentials
+            # Never combine Access-Control-Allow-Credentials with reflected origins
             response.headers["Access-Control-Allow-Origin"] = origin
-        
-        if self.config.allow_credentials:
-            response.headers["Access-Control-Allow-Credentials"] = "true"
         
         if self.config.allowed_methods:
             response.headers["Access-Control-Allow-Methods"] = ", ".join(self.config.allowed_methods)

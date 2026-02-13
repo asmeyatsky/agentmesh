@@ -15,6 +15,7 @@ Key Design Decisions:
 """
 
 import os
+import threading
 from dataclasses import dataclass
 from typing import Optional
 from loguru import logger
@@ -128,21 +129,23 @@ def generate_encryption_key() -> str:
     return Fernet.generate_key().decode()
 
 
-# Global config instance (initialized on first use)
+# Global config instance (thread-safe lazy init)
 _config: Optional[SecurityConfig] = None
+_config_lock = threading.Lock()
 
 
 def get_security_config() -> SecurityConfig:
     """
     Get or initialize global security configuration.
 
-    Implements lazy initialization pattern for config.
-    Thread-safe for read operations after initialization.
+    Uses double-checked locking for thread-safe lazy initialization.
 
     Returns:
         Singleton SecurityConfig instance
     """
     global _config
     if _config is None:
-        _config = load_security_config()
+        with _config_lock:
+            if _config is None:
+                _config = load_security_config()
     return _config

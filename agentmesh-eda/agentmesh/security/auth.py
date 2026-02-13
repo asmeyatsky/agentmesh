@@ -1,10 +1,11 @@
+import os
 from jose import jwt, JWTError
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 from loguru import logger
 
-SECRET_KEY = "your-secret-key"  # In a real app, this should be loaded from environment variables or a secure vault
-ALGORITHM = "HS256"
+SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "your-secret-key")
+ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
 
 
 def create_access_token(

@@ -11,6 +11,7 @@ Architectural Intent:
 - Integration with existing AgentMesh architecture
 """
 
+import time
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -31,6 +32,7 @@ from agentmesh.middleware.security import (
     APIKeyValidator,
     generate_secure_token,
 )
+from agentmesh.security.auth import verify_access_token
 
 from agentmesh.application.use_cases.create_agent_use_case import (
     CreateAgentUseCase,
@@ -84,16 +86,51 @@ class MetricsResponse(BaseModel):
 # Security
 security = HTTPBearer(auto_error=False)
 
+# Track app startup time for real uptime
+_app_start_time = time.time()
+
+# Track runtime metrics
+_runtime_metrics = {
+    "agents_created": 0,
+    "messages_processed": 0,
+    "requests_total": 0,
+}
+
+
+async def get_current_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> Dict[str, Any]:
+    """Authenticate request via Bearer token. Returns decoded JWT payload."""
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": "Missing authentication token", "code": "AUTH_REQUIRED"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    try:
+
+        class _CredentialsException(Exception):
+            pass
+
+        payload = verify_access_token(credentials.credentials, _CredentialsException)
+        return payload
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": "Invalid or expired token", "code": "AUTH_INVALID"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
-    # Startup
+    global _app_start_time
+    _app_start_time = time.time()
     logger.info("AgentMesh API starting up...")
 
     yield
 
-    # Shutdown
     logger.info("AgentMesh API shutting down...")
 
 
@@ -148,7 +185,7 @@ async def health_check():
         status="healthy",
         timestamp=datetime.utcnow(),
         version="1.0.0",
-        uptime=3600.0,  # Example value
+        uptime=time.time() - _app_start_time,
     )
 
 
@@ -165,7 +202,9 @@ async def health_check():
     },
 )
 async def list_agents(
-    tenant_id: str, use_case: CreateAgentUseCase = Depends(get_create_agent_use_case)
+    tenant_id: str,
+    use_case: CreateAgentUseCase = Depends(get_create_agent_use_case),
+    user: Dict[str, Any] = Depends(get_current_user),
 ):
     """List all agents for a tenant"""
     try:
@@ -196,6 +235,7 @@ async def create_agent(
     tenant_id: str,
     agent_data: AgentCreateRequest,
     use_case: CreateAgentUseCase = Depends(get_create_agent_use_case),
+    user: Dict[str, Any] = Depends(get_current_user),
 ):
     """Create a new agent"""
     try:
@@ -217,6 +257,7 @@ async def create_agent(
         result = await use_case.execute(create_dto)
 
         # Record metrics
+        _runtime_metrics["agents_created"] += 1
         AgentMeshMetrics.record_agent_created(tenant_id)
 
         return AgentInfoResponse(
@@ -260,7 +301,11 @@ async def create_agent(
         500: {"model": ErrorResponse, "description": "Internal server error"},
     },
 )
-async def get_agent(tenant_id: str, agent_id: str):
+async def get_agent(
+    tenant_id: str,
+    agent_id: str,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
     """Get specific agent by ID"""
     try:
         # In real implementation, would fetch from repository
@@ -289,14 +334,15 @@ async def get_agent(tenant_id: str, agent_id: str):
 async def get_metrics():
     """Get system metrics"""
     try:
+        uptime = time.time() - _app_start_time
+        throughput = _runtime_metrics["requests_total"] / uptime if uptime > 0 else 0.0
         return MetricsResponse(
-            agent_count=0,  # Would come from actual metrics
-            messages_processed=0,
-            uptime=3600.0,
+            agent_count=_runtime_metrics["agents_created"],
+            messages_processed=_runtime_metrics["messages_processed"],
+            uptime=uptime,
             performance_metrics={
-                "avg_response_time": 0.045,
-                "success_rate": 99.5,
-                "throughput": 1000.0,
+                "requests_total": float(_runtime_metrics["requests_total"]),
+                "throughput": round(throughput, 2),
             },
         )
     except Exception as e:

@@ -96,7 +96,8 @@ class AutonomousAgent:
         self.repository = agent_repository
         self.event_bus = event_bus
 
-        # Runtime state
+        # Runtime state (protected by _lock for concurrent access)
+        self._lock = asyncio.Lock()
         self.state = AgentExecutionState.IDLE
         self.task_queue: List[TaskOffering] = []
         self.current_task: Optional[TaskOffering] = None
@@ -127,46 +128,47 @@ class AutonomousAgent:
 
         logger.info(f"{self.aggregate.agent_id.value}: Processing {len(task_offerings)} task offerings")
 
-        # Step 1: Evaluate and accept tasks
-        accepted_tasks = []
-        for task in task_offerings:
-            decision = self.autonomy.should_accept_task(self.aggregate, task)
+        async with self._lock:
+            # Step 1: Evaluate and accept tasks
+            accepted_tasks = []
+            for task in task_offerings:
+                decision = self.autonomy.should_accept_task(self.aggregate, task)
 
-            if decision.should_accept:
-                accepted_tasks.append(task)
-                logger.info(
-                    f"{self.aggregate.agent_id.value}: Accepted task {task.task_id} "
-                    f"(score: {decision.confidence:.2f}, reason: {decision.reason})"
-                )
-            else:
-                logger.debug(
-                    f"{self.aggregate.agent_id.value}: Rejected task {task.task_id} "
-                    f"(reason: {decision.reason})"
-                )
+                if decision.should_accept:
+                    accepted_tasks.append(task)
+                    logger.info(
+                        f"{self.aggregate.agent_id.value}: Accepted task {task.task_id} "
+                        f"(score: {decision.confidence:.2f}, reason: {decision.reason})"
+                    )
+                else:
+                    logger.debug(
+                        f"{self.aggregate.agent_id.value}: Rejected task {task.task_id} "
+                        f"(reason: {decision.reason})"
+                    )
 
-        if not accepted_tasks:
-            return []
+            if not accepted_tasks:
+                return []
 
-        # Step 2: Prioritize accepted tasks
-        prioritized = self.autonomy.prioritize_tasks(self.aggregate, accepted_tasks)
-        logger.info(f"{self.aggregate.agent_id.value}: Prioritized {len(prioritized)} tasks")
+            # Step 2: Prioritize accepted tasks
+            prioritized = self.autonomy.prioritize_tasks(self.aggregate, accepted_tasks)
+            logger.info(f"{self.aggregate.agent_id.value}: Prioritized {len(prioritized)} tasks")
 
-        # Step 3: Add to task queue
-        self.task_queue.extend(prioritized)
+            # Step 3: Add to task queue
+            self.task_queue.extend(prioritized)
 
-        # Step 4: Update aggregate
-        for task in prioritized:
-            try:
-                self.aggregate = self.aggregate.assign_task(task.task_id)
-            except ValueError:
-                logger.warning(
-                    f"{self.aggregate.agent_id.value}: Could not assign task {task.task_id}"
-                )
+            # Step 4: Update aggregate
+            for task in prioritized:
+                try:
+                    self.aggregate = self.aggregate.assign_task(task.task_id)
+                except ValueError:
+                    logger.warning(
+                        f"{self.aggregate.agent_id.value}: Could not assign task {task.task_id}"
+                    )
 
-        # Step 5: Persist updated agent state
-        await self.repository.save(self.aggregate)
+            # Step 5: Persist updated agent state
+            await self.repository.save(self.aggregate)
 
-        return [task.task_id for task in prioritized]
+            return [task.task_id for task in prioritized]
 
     async def execute_tasks(self) -> List[TaskExecutionResult]:
         """
@@ -181,45 +183,63 @@ class AutonomousAgent:
         """
         results = []
 
-        while self.task_queue:
-            if self.state == AgentExecutionState.PAUSED:
-                logger.info(f"{self.aggregate.agent_id.value}: Paused, stopping task execution")
-                break
+        while True:
+            async with self._lock:
+                if not self.task_queue:
+                    break
+                if self.state == AgentExecutionState.PAUSED:
+                    logger.info(f"{self.aggregate.agent_id.value}: Paused, stopping task execution")
+                    break
 
-            # Get next task
-            current_task = self.task_queue.pop(0)
-            self.state = AgentExecutionState.PROCESSING_TASK
+                # Get next task
+                current_task = self.task_queue.pop(0)
+                self.state = AgentExecutionState.PROCESSING_TASK
+
+                # Ensure aggregate tracks this task (may already be assigned for first task)
+                if self.aggregate.current_task_id != current_task.task_id:
+                    try:
+                        self.aggregate = self.aggregate.assign_task(current_task.task_id)
+                    except ValueError:
+                        logger.warning(
+                            f"{self.aggregate.agent_id.value}: Could not assign task "
+                            f"{current_task.task_id} to aggregate, skipping"
+                        )
+                        continue
 
             try:
                 logger.info(f"{self.aggregate.agent_id.value}: Starting task {current_task.task_id}")
 
-                # Execute task (simulated)
+                # Execute task (simulated) — runs outside lock to avoid blocking
                 result = await self._execute_task(current_task)
                 results.append(result)
 
-                # Update aggregate based on result
-                if result.status == "SUCCESS":
-                    self.aggregate = self.aggregate.complete_task()
-                    logger.info(
-                        f"{self.aggregate.agent_id.value}: Completed task {current_task.task_id} "
-                        f"({result.execution_time_ms}ms)"
-                    )
-                else:
-                    self.aggregate = self.aggregate.fail_task(result.error_message)
-                    logger.error(
-                        f"{self.aggregate.agent_id.value}: Failed task {current_task.task_id}: "
-                        f"{result.error_message}"
-                    )
+                async with self._lock:
+                    # Update aggregate based on result
+                    if result.status == "SUCCESS":
+                        self.aggregate = self.aggregate.complete_task()
+                        logger.info(
+                            f"{self.aggregate.agent_id.value}: Completed task {current_task.task_id} "
+                            f"({result.execution_time_ms}ms)"
+                        )
+                    else:
+                        self.aggregate = self.aggregate.fail_task(result.error_message)
+                        logger.error(
+                            f"{self.aggregate.agent_id.value}: Failed task {current_task.task_id}: "
+                            f"{result.error_message}"
+                        )
 
-                # Persist state
-                await self.repository.save(self.aggregate)
+                    # Persist state
+                    await self.repository.save(self.aggregate)
 
             except Exception as e:
                 logger.error(f"{self.aggregate.agent_id.value}: Task execution error: {e}")
-                self.aggregate = self.aggregate.fail_task(str(e))
-                await self.repository.save(self.aggregate)
+                async with self._lock:
+                    if self.aggregate.current_task_id is not None:
+                        self.aggregate = self.aggregate.fail_task(str(e))
+                    await self.repository.save(self.aggregate)
 
-        self.state = AgentExecutionState.IDLE
+        async with self._lock:
+            self.state = AgentExecutionState.IDLE
         return results
 
     # ==================== Health Monitoring ====================

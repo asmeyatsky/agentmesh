@@ -183,6 +183,7 @@ class PostgresMessagePersistenceAdapter(MessagePersistencePort):
             ).limit(limit).offset(offset).all()
 
             messages = []
+            corrupted_ids = []
             for db_msg in db_messages:
                 try:
                     decrypted_bytes = decrypt_data(db_msg.encrypted_payload)
@@ -190,8 +191,17 @@ class PostgresMessagePersistenceAdapter(MessagePersistencePort):
                     message = UniversalMessage.deserialize(decrypted_str)
                     messages.append(message)
                 except Exception as e:
-                    logger.warning(f"Failed to decrypt message {db_msg.id}: {e}")
-                    continue
+                    corrupted_ids.append(db_msg.id)
+                    logger.error(
+                        f"Failed to decrypt message {db_msg.id} for tenant {tenant_id}: {e}. "
+                        f"Message will be excluded from results."
+                    )
+
+            if corrupted_ids:
+                logger.warning(
+                    f"Skipped {len(corrupted_ids)} corrupted messages for tenant {tenant_id}: "
+                    f"{corrupted_ids}"
+                )
 
             logger.debug(f"Retrieved {len(messages)} messages for tenant {tenant_id}")
             return messages
@@ -230,6 +240,7 @@ class PostgresMessagePersistenceAdapter(MessagePersistencePort):
             ).limit(limit).all()
 
             messages = []
+            corrupted_ids = []
             for db_msg in db_messages:
                 try:
                     decrypted_bytes = decrypt_data(db_msg.encrypted_payload)
@@ -237,8 +248,17 @@ class PostgresMessagePersistenceAdapter(MessagePersistencePort):
                     message = UniversalMessage.deserialize(decrypted_str)
                     messages.append(message)
                 except Exception as e:
-                    logger.warning(f"Failed to decrypt message {db_msg.id}: {e}")
-                    continue
+                    corrupted_ids.append(db_msg.id)
+                    logger.error(
+                        f"Failed to decrypt message {db_msg.id} (type={message_type}) "
+                        f"for tenant {tenant_id}: {e}. Message will be excluded from results."
+                    )
+
+            if corrupted_ids:
+                logger.warning(
+                    f"Skipped {len(corrupted_ids)} corrupted messages of type {message_type} "
+                    f"for tenant {tenant_id}: {corrupted_ids}"
+                )
 
             logger.debug(
                 f"Retrieved {len(messages)} messages of type {message_type} "
@@ -286,6 +306,6 @@ class PostgresMessagePersistenceAdapter(MessagePersistencePort):
 
         except Exception as e:
             logger.error(f"Failed to delete message {message_id}: {e}")
-            raise MessageNotPersistenceException(f"Failed to delete message: {e}") from e
+            raise MessageNotPersistedException(f"Failed to delete message: {e}") from e
         finally:
             db.close()

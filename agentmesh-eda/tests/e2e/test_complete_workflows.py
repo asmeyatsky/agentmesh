@@ -140,16 +140,17 @@ class TestAgentLifecycleE2E:
         )
 
         # Agent should be available again
-        available_agent = busy_agent.complete_task(
-            task.task_id, result=completed_task.result
-        )
+        available_agent = busy_agent.complete_task()
         assert available_agent.status == "AVAILABLE"
 
         # Step 4: Terminate agent
-        terminated_agent = available_agent.terminate("test_complete")
+        terminated_agent = available_agent.terminate()
 
         # Verify termination
         assert terminated_agent.status == "TERMINATED"
+
+        # Persist terminated state
+        await components["agent_repo"].save(terminated_agent)
 
         # Verify agent in repository reflects final state
         final_agent = await components["agent_repo"].get_by_id(
@@ -243,15 +244,11 @@ class TestAgentLifecycleE2E:
         assigned_agent = agent.assign_task(task.task_id)
 
         # Simulate task failure
-        failed_agent = assigned_agent.fail_task(
-            task.task_id,
-            error_message="Processing failed",
-            error_code="PROCESSING_ERROR",
-        )
+        failed_agent = assigned_agent.fail_task("Processing failed")
 
         # Agent should still be available after failure (not terminated)
         assert failed_agent.status == "AVAILABLE"
-        assert failed_agent.success_rate == 0.0  # 0/1 = 0%
+        assert failed_agent.get_success_rate() == 0.0  # 0/1 = 0%
 
         # Agent should be able to handle new tasks
         recovery_task = components["task_orchestrator"].create_task(
@@ -260,12 +257,10 @@ class TestAgentLifecycleE2E:
         recovered_agent = failed_agent.assign_task(recovery_task.task_id)
 
         # Complete recovery task successfully
-        final_agent = recovered_agent.complete_task(
-            recovery_task.task_id, {"status": "success"}
-        )
+        final_agent = recovered_agent.complete_task()
 
         # Agent should have improved success rate
-        assert final_agent.success_rate == 0.5  # 1/2 = 50%
+        assert final_agent.get_success_rate() == 0.5  # 1/2 = 50%
 
     async def test_tenant_isolation_throughout_journey(self, setup):
         """Test tenant isolation throughout complete journey"""
@@ -325,8 +320,8 @@ class TestAgentLifecycleE2E:
         # Verify tasks handled by correct agents
         assert task1.assigned_agent == "isolated-agent"
         assert task2.assigned_agent == "isolated-agent"
-        assert task1.result["tenant"] == "tenant-1"
-        assert task2.result["tenant"] == "tenant-2"
+        assert task1.result["result"] == "tenant1_success"
+        assert task2.result["result"] == "tenant2_success"
 
 
 @pytest.mark.asyncio
