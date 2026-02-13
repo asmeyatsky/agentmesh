@@ -23,22 +23,40 @@ from agentmesh.domain.entities.agent_aggregate import AgentAggregate
 from agentmesh.domain.value_objects.agent_value_objects import (
     AgentId,
     AgentCapability,
-    ResourceRequirement
+    ResourceRequirement,
 )
 from agentmesh.domain.domain_events.agent_events import AgentCreatedEvent
-from agentmesh.domain.ports.agent_repository_port import AgentRepositoryPort  # Will need to create
+from agentmesh.domain.ports.agent_repository_port import (
+    AgentRepositoryPort,
+)  # Will need to create
 from agentmesh.cqrs.bus import EventBus
+from agentmesh.cqrs.event import Event
+
+
+@dataclass
+class AgentCreatedCQRSWrapperEvent(Event):
+    """Wrapper event for CQRS compatibility"""
+
+    agent_created_event: AgentCreatedEvent
+
+    def __init__(self, agent_created_event: AgentCreatedEvent):
+        self.event_id = agent_created_event.event_id
+        self.created_at = agent_created_event.occurred_at
+        self.agent_created_event = agent_created_event
 
 
 @dataclass
 class CreateAgentDTO:
     """Input DTO: Data to create an agent"""
+
     tenant_id: str
     agent_id: str
     name: str
     agent_type: str = "generic"
     description: str = ""
-    capabilities: List[Dict[str, int]] = None  # [{"name": "task_processing", "level": 4}]
+    capabilities: List[Dict[str, int]] = (
+        None  # [{"name": "task_processing", "level": 4}]
+    )
     resource_requirements: Optional[Dict] = None
     metadata: Optional[Dict[str, str]] = None
     tags: Optional[List[str]] = None
@@ -47,6 +65,7 @@ class CreateAgentDTO:
 @dataclass
 class AgentCreatedResultDTO:
     """Output DTO: Result of agent creation"""
+
     agent_id: str
     tenant_id: str
     name: str
@@ -74,9 +93,7 @@ class CreateAgentUseCase:
         Exception: If repository save fails
     """
 
-    def __init__(self,
-                 agent_repository: AgentRepositoryPort,
-                 event_bus: EventBus):
+    def __init__(self, agent_repository: AgentRepositoryPort, event_bus: EventBus):
         """
         Initialize use case with dependencies.
 
@@ -114,7 +131,7 @@ class CreateAgentUseCase:
                 for cap_dict in dto.capabilities:
                     cap = AgentCapability(
                         name=cap_dict["name"],
-                        proficiency_level=cap_dict.get("level", 1)
+                        proficiency_level=cap_dict.get("level", 1),
                     )
                     capabilities.append(cap)
             else:
@@ -136,7 +153,7 @@ class CreateAgentUseCase:
                 capabilities=capabilities,
                 resource_requirements=resource_req,
                 metadata=dto.metadata or {},
-                tags=set(dto.tags or [])
+                tags=set(dto.tags or []),
             )
 
             # Step 3: Save to repository
@@ -146,15 +163,14 @@ class CreateAgentUseCase:
             # Step 4: Publish domain event
             event = AgentCreatedEvent(
                 aggregate_id=agent_id.value,
-                agent_id=agent_id.value,
                 tenant_id=dto.tenant_id,
                 name=agent.name,
                 agent_type=agent.agent_type,
                 capabilities=[c.name for c in capabilities],
-                occurred_at=datetime.utcnow(),
-                metadata=agent.metadata
+                metadata=agent.metadata,
             )
-            await self.event_bus.publish(event)
+            wrapper_event = AgentCreatedCQRSWrapperEvent(event)
+            await self.event_bus.publish([wrapper_event])
             logger.info(f"Published AgentCreatedEvent for {agent_id}")
 
             # Step 5: Return result DTO
@@ -164,7 +180,7 @@ class CreateAgentUseCase:
                 name=agent.name,
                 status=agent.status,
                 created_at=agent.created_at,
-                capabilities_count=len(capabilities)
+                capabilities_count=len(capabilities),
             )
 
             logger.info(f"Successfully created agent {agent_id}: {result}")

@@ -28,8 +28,9 @@ class AnomalyDetector:
         if len(self.data_window) >= self.window_size:
             mean = np.mean(self.data_window)
             std_dev = np.std(self.data_window)
-            if std_dev == 0: # Avoid division by zero if all data points are the same
-                is_anomaly = False
+            if std_dev == 0: # All data points are the same, use fallback
+                effective_std = max(abs(mean) * 0.1, 1.0)
+                is_anomaly = abs(data_point - mean) > self.std_dev_threshold * effective_std
             elif abs(data_point - mean) > self.std_dev_threshold * std_dev:
                 is_anomaly = True
                 logger.warning(

@@ -1,5 +1,10 @@
 import pytest
+import sys
 from unittest.mock import MagicMock
+
+# Mock the pulsar import before importing the adapter
+sys.modules["pulsar"] = MagicMock()
+
 from agentmesh.mal.adapters.pulsar import PulsarAdapter
 from agentmesh.mal.message import UniversalMessage
 

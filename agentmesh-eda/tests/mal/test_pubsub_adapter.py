@@ -1,5 +1,11 @@
 import pytest
+import sys
 from unittest.mock import MagicMock
+
+# Mock the pubsub import before importing the adapter
+sys.modules["google.cloud"] = MagicMock()
+sys.modules["google.cloud.pubsub_v1"] = MagicMock()
+
 from agentmesh.mal.adapters.pubsub import PubSubAdapter
 from agentmesh.mal.message import UniversalMessage
 

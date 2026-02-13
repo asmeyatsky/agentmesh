@@ -13,31 +13,63 @@ Architectural Intent:
 import pytest
 from datetime import datetime
 
-from agentmesh.application.use_cases.create_agent_use_case import CreateAgentUseCase, CreateAgentDTO
+from agentmesh.application.use_cases.create_agent_use_case import (
+    CreateAgentUseCase,
+    CreateAgentDTO,
+)
 from agentmesh.domain.value_objects.agent_value_objects import AgentCapability
 from agentmesh.cqrs.bus import EventBus
 from agentmesh.domain.domain_events.agent_events import AgentCreatedEvent
+from agentmesh.domain.ports.agent_repository_port import AgentRepositoryPort
 
 
-class InMemoryAgentRepository:
+class InMemoryAgentRepository(AgentRepositoryPort):
     """Mock repository for testing"""
+
     def __init__(self):
         self.agents = {}
 
     async def save(self, agent):
-        self.agents[agent.agent_id.value] = agent
+        # Use composite key for tenant isolation
+        key = f"{agent.tenant_id}:{agent.agent_id.value}"
+        self.agents[key] = agent
 
     async def get_by_id(self, agent_id, tenant_id):
-        return self.agents.get(agent_id)
+        key = f"{tenant_id}:{agent_id}"
+        return self.agents.get(key)
+
+    async def find_by_capabilities(self, capabilities, tenant_id, match_all=False):
+        return []
+
+    async def find_all(self, tenant_id):
+        return list(self.agents.values())
+
+    async def find_available(self, tenant_id):
+        return []
+
+    async def find_by_status(self, status, tenant_id):
+        return []
+
+    async def delete(self, agent_id, tenant_id):
+        return self.agents.pop(agent_id, None) is not None
+
+    async def count(self, tenant_id):
+        return len(self.agents)
 
 
-class InMemoryEventBus:
+class InMemoryEventBus(EventBus):
     """Mock event bus for testing"""
+
     def __init__(self):
+        # Mock router to satisfy EventBus interface
+        from unittest.mock import MagicMock
+
+        mock_router = MagicMock()
+        super().__init__(mock_router)
         self.events = []
 
-    async def publish(self, event):
-        self.events.append(event)
+    async def publish(self, events):
+        self.events.extend(events)
 
 
 @pytest.mark.asyncio
@@ -64,10 +96,10 @@ class TestCreateAgentUseCase:
             description="Processes incoming data",
             capabilities=[
                 {"name": "data_processing", "level": 4},
-                {"name": "analysis", "level": 3}
+                {"name": "analysis", "level": 3},
             ],
             metadata={"version": "1.0"},
-            tags=["production", "critical"]
+            tags=["production", "critical"],
         )
 
         result = await use_case.execute(dto)
@@ -87,7 +119,7 @@ class TestCreateAgentUseCase:
             tenant_id="tenant-1",
             agent_id="agent-002",
             name="Analyzer",
-            capabilities=[{"name": "analysis", "level": 5}]
+            capabilities=[{"name": "analysis", "level": 5}],
         )
 
         await use_case.execute(dto)
@@ -107,18 +139,21 @@ class TestCreateAgentUseCase:
             tenant_id="tenant-1",
             agent_id="agent-003",
             name="Event Test Agent",
-            capabilities=[{"name": "test", "level": 2}]
+            capabilities=[{"name": "test", "level": 2}],
         )
 
         await use_case.execute(dto)
 
         # Verify event published
         assert len(bus.events) == 1
-        event = bus.events[0]
-        assert isinstance(event, AgentCreatedEvent)
-        assert event.agent_id == "agent-003"
-        assert event.tenant_id == "tenant-1"
-        assert event.name == "Event Test Agent"
+        wrapper_event = bus.events[0]
+        # Check that wrapper contains AgentCreatedEvent
+        assert hasattr(wrapper_event, "agent_created_event")
+        domain_event = wrapper_event.agent_created_event
+        assert isinstance(domain_event, AgentCreatedEvent)
+        assert domain_event.agent_id == "agent-003"
+        assert domain_event.tenant_id == "tenant-1"
+        assert domain_event.name == "Event Test Agent"
 
     async def test_multiple_agents_created(self, setup):
         """Verify multiple agents can be created independently"""
@@ -128,14 +163,14 @@ class TestCreateAgentUseCase:
             tenant_id="tenant-1",
             agent_id="agent-a",
             name="Agent A",
-            capabilities=[{"name": "task_a", "level": 3}]
+            capabilities=[{"name": "task_a", "level": 3}],
         )
 
         agent2_dto = CreateAgentDTO(
             tenant_id="tenant-1",
             agent_id="agent-b",
             name="Agent B",
-            capabilities=[{"name": "task_b", "level": 4}]
+            capabilities=[{"name": "task_b", "level": 4}],
         )
 
         result1 = await use_case.execute(agent1_dto)
@@ -158,14 +193,14 @@ class TestCreateAgentUseCase:
             tenant_id="tenant-1",
             agent_id="shared-id",
             name="Agent in Tenant 1",
-            capabilities=[{"name": "test", "level": 1}]
+            capabilities=[{"name": "test", "level": 1}],
         )
 
         agent2_dto = CreateAgentDTO(
             tenant_id="tenant-2",
             agent_id="shared-id",
             name="Agent in Tenant 2",
-            capabilities=[{"name": "test", "level": 1}]
+            capabilities=[{"name": "test", "level": 1}],
         )
 
         result1 = await use_case.execute(agent1_dto)
@@ -189,7 +224,7 @@ class TestCreateAgentUseCase:
             tenant_id="tenant-1",
             agent_id="invalid",
             name="Invalid Agent",
-            capabilities=[]  # INVALID: No capabilities
+            capabilities=[],  # INVALID: No capabilities
         )
 
         with pytest.raises(ValueError):
@@ -208,10 +243,10 @@ class TestCreateAgentUseCase:
             capabilities=[
                 {"name": "skill1", "level": 1},
                 {"name": "skill2", "level": 2},
-                {"name": "skill3", "level": 3}
+                {"name": "skill3", "level": 3},
             ],
             metadata={"key1": "value1", "key2": "value2"},
-            tags=["tag1", "tag2", "tag3"]
+            tags=["tag1", "tag2", "tag3"],
         )
 
         result = await use_case.execute(dto)

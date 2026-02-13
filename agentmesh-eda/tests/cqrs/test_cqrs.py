@@ -2,7 +2,7 @@ from agentmesh.cqrs.command import Command
 from agentmesh.cqrs.event import Event
 from agentmesh.cqrs.handler import CommandHandler, EventHandler
 from agentmesh.cqrs.event_store import InMemoryEventStore
-from agentmesh.cqrs.bus import CommandBus
+from agentmesh.cqrs.bus import CqrsBus
 from dataclasses import dataclass
 from datetime import datetime
 import uuid
@@ -87,9 +87,7 @@ class BankAccountCommandHandler(CommandHandler):
                 command.tenant_id, account.account_id, account.changes
             )
         elif isinstance(command, CreditAccount):
-            events = self.event_store.load_events(
-                command.tenant_id, command.account_id
-            )
+            events = self.event_store.load_events(command.tenant_id, command.account_id)
             account = BankAccount(command.account_id)
             account.load_from_history(events)
             account.credit(command.amount)
@@ -126,28 +124,28 @@ class BankAccountEventHandler(EventHandler):
 def test_cqrs_flow():
     # Setup
     event_store = InMemoryEventStore()
-    command_bus = CommandBus()
+    command_bus = CqrsBus()
 
     command_handler = BankAccountCommandHandler(event_store)
-    command_bus.register_handler(CreateAccount, command_handler)
-    command_bus.register_handler(CreditAccount, command_handler)
+    command_bus.register_command_handler(CreateAccount, command_handler)
+    command_bus.register_command_handler(CreditAccount, command_handler)
 
     # Execute commands for tenant 1
     tenant_1_id = "tenant1"
     account_1_id = "123"
-    command_bus.dispatch(
+    command_bus.dispatch_command(
         CreateAccount(
             tenant_id=tenant_1_id, account_id=account_1_id, initial_balance=100.0
         )
     )
-    command_bus.dispatch(
+    command_bus.dispatch_command(
         CreditAccount(tenant_id=tenant_1_id, account_id=account_1_id, amount=50.0)
     )
 
     # Execute commands for tenant 2
     tenant_2_id = "tenant2"
     account_2_id = "456"
-    command_bus.dispatch(
+    command_bus.dispatch_command(
         CreateAccount(
             tenant_id=tenant_2_id, account_id=account_2_id, initial_balance=200.0
         )

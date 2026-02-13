@@ -9,11 +9,17 @@ Provides:
 - Pytest configuration and marks
 """
 
+import os
 import pytest
 import asyncio
 import logging
 from datetime import timedelta, datetime
 from unittest.mock import AsyncMock, MagicMock
+
+# Set required environment variables before any lazy initialization
+os.environ.setdefault("ENCRYPTION_KEY", "pQKcaduh-gF3PDrZ56uJzcJOt4X10AgthjJETVxVNQM=")
+os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret-key-for-testing-only")
+
 from agentmesh.security.auth import create_access_token
 
 
@@ -33,7 +39,7 @@ def event_loop():
 def valid_token():
     """Generate valid auth token"""
     data = {"sub": "testuser", "roles": ["agent"]}
-    token = create_access_token(data, expires_delta=timedelta(days=3650))
+    token = create_access_token(data, tenant_id="test_tenant", expires_delta=timedelta(days=3650))
     return token
 
 

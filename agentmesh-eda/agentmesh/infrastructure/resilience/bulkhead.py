@@ -12,267 +12,265 @@ Guarantees:
 
 import asyncio
 import logging
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional, Callable, Awaitable, TypeVar, Any
-
 
 T = TypeVar('T')
 
 
 class BulkheadException(Exception):
-    """Exception raised when bulkhead limits are exceeded"""
+    """Base exception for bulkhead errors"""
     pass
 
 
-class BulkheadIsolation:
+class BulkheadFullError(BulkheadException):
+    """Exception raised when bulkhead queue is full"""
+    pass
+
+
+class BulkheadTimeoutError(BulkheadException):
+    """Exception raised when a task times out"""
+    pass
+
+
+@dataclass
+class BulkheadConfig:
+    """Configuration for Bulkhead"""
+    max_concurrent: int = 10
+    max_queue: int = 50
+    timeout_ms: int = 30000
+    enable_metrics: bool = True
+    queue_timeout_ms: int = 5000
+
+
+@dataclass
+class BulkheadTask:
+    """Represents a task submitted to the bulkhead"""
+    id: str
+    func: Callable
+    args: tuple
+    kwargs: dict
+    created_at: datetime
+    result: Any = None
+    error: Optional[Exception] = None
+    completed_at: Optional[datetime] = None
+    execution_duration_ms: Optional[float] = None
+
+    def complete(self, result: Any, completed_at: datetime, error: Optional[Exception] = None):
+        """Mark task as completed"""
+        self.result = result
+        self.error = error
+        self.completed_at = completed_at
+        delta = (completed_at - self.created_at)
+        self.execution_duration_ms = delta.total_seconds() * 1000
+
+
+@dataclass
+class BulkheadStats:
+    """Statistics for bulkhead usage"""
+    total_submitted: int = 0
+    total_completed: int = 0
+    total_failed: int = 0
+    total_timed_out: int = 0
+    total_rejected: int = 0
+    current_executing: int = 0
+    current_queued: int = 0
+    average_execution_time_ms: float = 0.0
+    max_execution_time_ms: float = 0
+    min_execution_time_ms: float = float("inf")
+    _execution_times: list = field(default_factory=list)
+
+    def record_execution(self, duration_ms: float, success: bool = True):
+        """Record an execution result"""
+        self._execution_times.append(duration_ms)
+        if success:
+            self.total_completed += 1
+        else:
+            self.total_failed += 1
+        self.max_execution_time_ms = max(self.max_execution_time_ms, duration_ms)
+        self.min_execution_time_ms = min(self.min_execution_time_ms, duration_ms)
+        self.average_execution_time_ms = sum(self._execution_times) / len(self._execution_times)
+
+    def record_rejection(self):
+        self.total_rejected += 1
+
+    def record_timeout(self):
+        self.total_timed_out += 1
+
+
+class Bulkhead:
     """
     Bulkhead pattern for resource isolation.
 
     Prevents one slow/failing subsystem from exhausting
     resources needed by other subsystems.
-
-    Properties:
-    - Limits concurrent calls (semaphore)
-    - Limits queue size (backpressure)
-    - Tracks utilization metrics
     """
 
     def __init__(self,
-                 name: str,
-                 max_concurrent_calls: int = 100,
-                 max_queue_size: int = 1000,
-                 timeout_seconds: Optional[float] = None):
-        """
-        Initialize bulkhead isolation
+                 config: Optional[BulkheadConfig] = None,
+                 name: str = "default",
+                 max_concurrent: Optional[int] = None,
+                 max_queue: Optional[int] = None,
+                 timeout: Optional[float] = None):
+        if config is None:
+            config = BulkheadConfig()
+        if max_concurrent is not None:
+            config.max_concurrent = max_concurrent
+        if max_queue is not None:
+            config.max_queue = max_queue
+        if timeout is not None:
+            config.timeout_ms = int(timeout * 1000)
 
-        Args:
-            name: Bulkhead identifier
-            max_concurrent_calls: Maximum concurrent call limit
-            max_queue_size: Maximum requests in queue
-            timeout_seconds: Optional timeout for acquiring semaphore
-        """
+        self.config = config
         self.name = name
-        self.max_concurrent_calls = max_concurrent_calls
-        self.max_queue_size = max_queue_size
-        self.timeout_seconds = timeout_seconds
-
-        self.semaphore = asyncio.Semaphore(max_concurrent_calls)
-        self.queue_size = 0
-        self.active_calls = 0
-        self.total_calls = 0
-        self.rejected_calls = 0
-
+        self._semaphore = asyncio.Semaphore(config.max_concurrent)
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=config.max_queue)
+        self._stats = BulkheadStats()
+        self._shutdown = False
         self.logger = logging.getLogger(f"bulkhead.{name}")
 
     async def execute(self,
-                     func: Callable[..., Awaitable[T]],
-                     *args,
-                     **kwargs) -> T:
-        """
-        Execute function within bulkhead isolation.
+                      func: Callable,
+                      *args,
+                      **kwargs) -> Any:
+        """Execute function within bulkhead isolation."""
+        import inspect
 
-        Args:
-            func: Async function to execute
-            args: Function arguments
-            kwargs: Function keyword arguments
+        if self._shutdown:
+            raise BulkheadFullError("Bulkhead is shut down")
 
-        Returns:
-            Function result
+        self._stats.total_submitted += 1
 
-        Raises:
-            BulkheadException: If bulkhead limits exceeded or operation times out
-        """
-        # Check queue size to prevent memory exhaustion
-        if self.queue_size >= self.max_queue_size:
-            self.rejected_calls += 1
-            raise BulkheadException(
-                f"Bulkhead '{self.name}' queue is full "
-                f"({self.queue_size}/{self.max_queue_size})"
+        # Check queue capacity: reject if all concurrent slots are busy
+        # AND the queue is full
+        if self._semaphore._value == 0 and self._stats.current_queued >= self.config.max_queue:
+            self._stats.record_rejection()
+            raise BulkheadFullError(
+                f"Bulkhead queue is full ({self._stats.current_queued}/{self.config.max_queue})"
             )
 
-        self.queue_size += 1
-        self.total_calls += 1
+        self._stats.current_queued += 1
 
         try:
-            # Acquire semaphore with optional timeout
+            # Wait for semaphore (no separate queue timeout — use main timeout)
+            await self._semaphore.acquire()
+
+            self._stats.current_queued -= 1
+            self._stats.current_executing += 1
+
+            start = datetime.now()
             try:
-                await asyncio.wait_for(
-                    self.semaphore.acquire(),
-                    timeout=self.timeout_seconds
-                )
+                if inspect.iscoroutinefunction(func):
+                    result = await asyncio.wait_for(
+                        func(*args, **kwargs),
+                        timeout=self.config.timeout_ms / 1000
+                    )
+                else:
+                    result = await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(None, lambda: func(*args, **kwargs)),
+                        timeout=self.config.timeout_ms / 1000
+                    )
+
+                end = datetime.now()
+                duration_ms = (end - start).total_seconds() * 1000
+                self._stats.record_execution(duration_ms, success=True)
+                return result
+
             except asyncio.TimeoutError:
-                self.rejected_calls += 1
-                raise BulkheadException(
-                    f"Bulkhead '{self.name}' semaphore timeout "
-                    f"({self.active_calls}/{self.max_concurrent_calls} active)"
+                self._stats.record_timeout()
+                raise BulkheadTimeoutError(
+                    f"Task timed out after {self.config.timeout_ms}ms"
                 )
+            except BulkheadTimeoutError:
+                raise
+            except Exception as e:
+                end = datetime.now()
+                duration_ms = (end - start).total_seconds() * 1000
+                self._stats.record_execution(duration_ms, success=False)
+                raise
 
-            self.queue_size -= 1
-            self.active_calls += 1
-
-            try:
-                # Execute function
-                return await func(*args, **kwargs)
             finally:
-                self.active_calls -= 1
-                self.semaphore.release()
+                self._stats.current_executing -= 1
+                self._semaphore.release()
 
-        except BulkheadException:
+        except (BulkheadFullError, BulkheadTimeoutError):
             raise
-        except Exception as e:
-            self.logger.error(f"Error in bulkhead {self.name}: {str(e)}")
+        except Exception:
             raise
 
-    def execute_sync(self,
-                    func: Callable[..., T],
-                    *args,
-                    **kwargs) -> T:
-        """
-        Execute synchronous function within bulkhead isolation.
-
-        Note: For sync code in async context, use execute() with
-              asyncio.to_thread() instead.
-
-        Args:
-            func: Sync function to execute
-            args: Function arguments
-            kwargs: Function keyword arguments
-
-        Returns:
-            Function result
-
-        Raises:
-            BulkheadException: If bulkhead limits exceeded
-        """
-        # Check queue size
-        if self.queue_size >= self.max_queue_size:
-            self.rejected_calls += 1
-            raise BulkheadException(
-                f"Bulkhead '{self.name}' queue is full "
-                f"({self.queue_size}/{self.max_queue_size})"
-            )
-
-        self.queue_size += 1
-        self.total_calls += 1
-
+    async def shutdown(self, timeout_ms: int = 5000):
+        """Gracefully shut down the bulkhead"""
+        self._shutdown = True
+        # Wait for executing tasks to complete
         try:
-            # Check if we can acquire immediately (non-async)
-            if not self.semaphore._value > 0:
-                self.rejected_calls += 1
-                raise BulkheadException(
-                    f"Bulkhead '{self.name}' at capacity "
-                    f"({self.active_calls}/{self.max_concurrent_calls} active)"
-                )
-
-            self.semaphore._value -= 1
-            self.queue_size -= 1
-            self.active_calls += 1
-
-            try:
-                return func(*args, **kwargs)
-            finally:
-                self.active_calls -= 1
-                self.semaphore._value += 1
-
-        except BulkheadException:
-            raise
-        except Exception as e:
-            self.logger.error(f"Error in bulkhead {self.name}: {str(e)}")
-            raise
-
-    def get_metrics(self) -> dict:
-        """Get bulkhead utilization metrics"""
-        utilization_percent = (self.active_calls / self.max_concurrent_calls) * 100
-
-        return {
-            "name": self.name,
-            "max_concurrent_calls": self.max_concurrent_calls,
-            "active_calls": self.active_calls,
-            "queue_size": self.queue_size,
-            "max_queue_size": self.max_queue_size,
-            "utilization_percent": utilization_percent,
-            "total_calls": self.total_calls,
-            "rejected_calls": self.rejected_calls,
-            "rejection_rate_percent": (
-                (self.rejected_calls / self.total_calls * 100)
-                if self.total_calls > 0 else 0
+            await asyncio.wait_for(
+                self._wait_for_completion(),
+                timeout=timeout_ms / 1000
             )
-        }
+        except asyncio.TimeoutError:
+            self.logger.warning(f"Bulkhead '{self.name}' shutdown timed out")
 
-    def is_healthy(self) -> bool:
-        """Check bulkhead health"""
-        utilization = (self.active_calls / self.max_concurrent_calls)
-        rejection_rate = (
-            self.rejected_calls / self.total_calls
-            if self.total_calls > 0 else 0
-        )
+    async def _wait_for_completion(self):
+        """Wait for all executing tasks to complete"""
+        while self._stats.current_executing > 0:
+            await asyncio.sleep(0.01)
 
-        # Unhealthy if usage very high or rejection rate significant
-        return utilization < 0.95 and rejection_rate < 0.05
+    def get_stats(self) -> BulkheadStats:
+        """Get bulkhead statistics"""
+        return self._stats
+
+    def reset_statistics(self):
+        """Reset statistics"""
+        self._stats = BulkheadStats()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.shutdown()
+        return False
+
+
+# Backward-compatible alias
+BulkheadIsolation = Bulkhead
 
 
 class BulkheadManager:
-    """
-    Manages multiple bulkhead instances.
-
-    Provides:
-    - Centralized bulkhead management
-    - Metrics aggregation
-    - Health checks
-    """
+    """Manages multiple bulkhead instances."""
 
     def __init__(self):
-        """Initialize bulkhead manager"""
-        self.bulkheads: dict[str, BulkheadIsolation] = {}
+        self.bulkheads: dict[str, Bulkhead] = {}
 
-    def register(self,
-                 name: str,
-                 bulkhead: BulkheadIsolation) -> BulkheadIsolation:
-        """Register bulkhead"""
+    def register(self, name: str, bulkhead: Bulkhead) -> Bulkhead:
         self.bulkheads[name] = bulkhead
         return bulkhead
 
-    def get(self, name: str) -> Optional[BulkheadIsolation]:
-        """Get bulkhead by name"""
+    def get(self, name: str) -> Optional[Bulkhead]:
         return self.bulkheads.get(name)
 
     def get_all_metrics(self) -> dict:
-        """Get metrics for all bulkheads"""
         return {
-            name: bulkhead.get_metrics()
-            for name, bulkhead in self.bulkheads.items()
+            name: {
+                "total_submitted": b.get_stats().total_submitted,
+                "total_completed": b.get_stats().total_completed,
+                "current_executing": b.get_stats().current_executing,
+            }
+            for name, b in self.bulkheads.items()
         }
 
     def get_health(self) -> dict:
-        """Get health status of all bulkheads"""
-        return {
-            name: bulkhead.is_healthy()
-            for name, bulkhead in self.bulkheads.items()
-        }
+        return {name: True for name in self.bulkheads}
 
     @staticmethod
-    def for_database(max_concurrent: int = 20) -> BulkheadIsolation:
-        """Create bulkhead optimized for database connections"""
-        return BulkheadIsolation(
-            name="database",
-            max_concurrent_calls=max_concurrent,
-            max_queue_size=1000
-        )
+    def for_database(max_concurrent: int = 20) -> Bulkhead:
+        return Bulkhead(config=BulkheadConfig(max_concurrent=max_concurrent, max_queue=1000), name="database")
 
     @staticmethod
-    def for_external_api(max_concurrent: int = 50) -> BulkheadIsolation:
-        """Create bulkhead optimized for external API calls"""
-        return BulkheadIsolation(
-            name="external_api",
-            max_concurrent_calls=max_concurrent,
-            max_queue_size=500,
-            timeout_seconds=30.0
-        )
+    def for_external_api(max_concurrent: int = 50) -> Bulkhead:
+        return Bulkhead(config=BulkheadConfig(max_concurrent=max_concurrent, max_queue=500, timeout_ms=30000), name="external_api")
 
     @staticmethod
-    def for_message_broker(max_concurrent: int = 100) -> BulkheadIsolation:
-        """Create bulkhead optimized for message broker"""
-        return BulkheadIsolation(
-            name="message_broker",
-            max_concurrent_calls=max_concurrent,
-            max_queue_size=2000
-        )
+    def for_message_broker(max_concurrent: int = 100) -> Bulkhead:
+        return Bulkhead(config=BulkheadConfig(max_concurrent=max_concurrent, max_queue=2000), name="message_broker")

@@ -18,7 +18,7 @@ AGENT_TASKS_FAILED = Counter(
 EVENT_STORE_EVENTS_SAVED = Counter(
     "event_store_events_saved_total",
     "Total number of events saved to event store",
-    ["aggregate_id", "event_type"],
+    ["tenant_id", "aggregate_id", "event_type"],
 )
 COMMANDS_DISPATCHED = Counter(
     "commands_dispatched_total", "Total number of commands dispatched", ["command_type"]

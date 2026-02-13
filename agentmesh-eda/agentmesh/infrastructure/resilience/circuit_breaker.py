@@ -17,6 +17,7 @@ Architectural Intent:
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Optional, Callable, Any, Awaitable
@@ -29,6 +30,10 @@ class CircuitState(str, Enum):
     HALF_OPEN = "half_open"    # Testing recovery, allow limited requests
 
 
+# Alias for tests that use the longer name
+CircuitBreakerState = CircuitState
+
+
 class CircuitBreakerOpenException(Exception):
     """Exception raised when circuit is open"""
     pass
@@ -37,6 +42,20 @@ class CircuitBreakerOpenException(Exception):
 class CircuitBreakerException(Exception):
     """General circuit breaker exception"""
     pass
+
+
+@dataclass
+class CircuitBreakerConfig:
+    """Configuration for circuit breaker"""
+    failure_threshold: int = 5
+    recovery_timeout: float = 60.0  # seconds
+    expected_exception: type = Exception
+    success_threshold_half_open: int = 2
+    recovery_timeout_seconds: int = 60  # alias kept for backward compat
+
+    def __post_init__(self):
+        if self.recovery_timeout_seconds != 60 and self.recovery_timeout == 60.0:
+            self.recovery_timeout = float(self.recovery_timeout_seconds)
 
 
 class CircuitBreaker:
@@ -51,26 +70,36 @@ class CircuitBreaker:
     """
 
     def __init__(self,
-                 name: str,
+                 name: str = "default",
+                 config: Optional[CircuitBreakerConfig] = None,
+                 retry_policy: Any = None,
                  failure_threshold: int = 5,
                  recovery_timeout_seconds: int = 60,
+                 recovery_timeout_ms: Optional[int] = None,
                  expected_exception: type = Exception,
                  success_threshold_half_open: int = 2):
         """
-        Initialize circuit breaker
+        Initialize circuit breaker.
 
-        Args:
-            name: Circuit breaker identifier
-            failure_threshold: Failures before opening circuit
-            recovery_timeout_seconds: Time before attempting recovery
-            expected_exception: Exception type to count as failure
-            success_threshold_half_open: Successes to close circuit from HALF_OPEN
+        Accepts either a CircuitBreakerConfig or individual parameters.
         """
-        self.name = name
-        self.failure_threshold = failure_threshold
-        self.recovery_timeout_seconds = recovery_timeout_seconds
-        self.expected_exception = expected_exception
-        self.success_threshold_half_open = success_threshold_half_open
+        if config:
+            self.name = name
+            self.failure_threshold = config.failure_threshold
+            self.recovery_timeout_seconds = config.recovery_timeout
+            self.expected_exception = config.expected_exception
+            self.success_threshold_half_open = config.success_threshold_half_open
+        else:
+            self.name = name
+            self.failure_threshold = failure_threshold
+            if recovery_timeout_ms is not None:
+                self.recovery_timeout_seconds = recovery_timeout_ms / 1000.0
+            else:
+                self.recovery_timeout_seconds = recovery_timeout_seconds
+            self.expected_exception = expected_exception
+            self.success_threshold_half_open = success_threshold_half_open
+
+        self.retry_policy = retry_policy
 
         # State tracking
         self.state = CircuitState.CLOSED
@@ -80,26 +109,15 @@ class CircuitBreaker:
 
         self.logger = logging.getLogger(f"circuit_breaker.{name}")
 
+    def record_failure(self):
+        """Record a failure externally (for integration with other patterns)"""
+        self._on_failure()
+
     async def call(self,
                    func: Callable[..., Awaitable[Any]],
                    *args,
                    **kwargs) -> Any:
-        """
-        Execute function through circuit breaker.
-
-        Args:
-            func: Async function to execute
-            args: Function arguments
-            kwargs: Function keyword arguments
-
-        Returns:
-            Function result
-
-        Raises:
-            CircuitBreakerOpenException: If circuit is open
-            Exception: If function fails
-        """
-        # Check if circuit should open
+        """Execute function through circuit breaker."""
         if self.state == CircuitState.OPEN:
             if self._should_attempt_reset():
                 self._transition_to(CircuitState.HALF_OPEN)
@@ -109,7 +127,6 @@ class CircuitBreaker:
                     f"Circuit breaker '{self.name}' is OPEN"
                 )
 
-        # Execute function
         try:
             result = await func(*args, **kwargs)
             self._on_success()
@@ -122,22 +139,7 @@ class CircuitBreaker:
                   func: Callable[..., Any],
                   *args,
                   **kwargs) -> Any:
-        """
-        Execute synchronous function through circuit breaker.
-
-        Args:
-            func: Sync function to execute
-            args: Function arguments
-            kwargs: Function keyword arguments
-
-        Returns:
-            Function result
-
-        Raises:
-            CircuitBreakerOpenException: If circuit is open
-            Exception: If function fails
-        """
-        # Check if circuit should open
+        """Execute synchronous function through circuit breaker."""
         if self.state == CircuitState.OPEN:
             if self._should_attempt_reset():
                 self._transition_to(CircuitState.HALF_OPEN)
@@ -147,7 +149,6 @@ class CircuitBreaker:
                     f"Circuit breaker '{self.name}' is OPEN"
                 )
 
-        # Execute function
         try:
             result = func(*args, **kwargs)
             self._on_success()
@@ -158,11 +159,9 @@ class CircuitBreaker:
 
     def _on_success(self):
         """Handle successful call"""
-        # Reset failure count when in CLOSED state
         if self.state == CircuitState.CLOSED:
             self.failure_count = 0
 
-        # Track recovery progress in HALF_OPEN state
         if self.state == CircuitState.HALF_OPEN:
             self.success_count += 1
             if self.success_count >= self.success_threshold_half_open:
@@ -173,11 +172,9 @@ class CircuitBreaker:
         self.failure_count += 1
         self.last_failure_time = datetime.utcnow()
 
-        # Transition to OPEN if threshold exceeded
         if self.failure_count >= self.failure_threshold:
             self._transition_to(CircuitState.OPEN)
 
-        # Reset recovery progress in HALF_OPEN state
         if self.state == CircuitState.HALF_OPEN:
             self._transition_to(CircuitState.OPEN)
 
@@ -195,7 +192,6 @@ class CircuitBreaker:
         old_state = self.state
         self.state = new_state
 
-        # Reset counters for new state
         if new_state == CircuitState.CLOSED:
             self.failure_count = 0
             self.success_count = 0
@@ -231,45 +227,30 @@ class CircuitBreaker:
 
 
 class CircuitBreakerManager:
-    """
-    Manager for multiple circuit breakers.
-
-    Provides:
-    - Centralized circuit breaker management
-    - Metrics aggregation
-    - Bulk operations
-    """
+    """Manager for multiple circuit breakers."""
 
     def __init__(self):
-        """Initialize circuit breaker manager"""
         self.breakers: dict[str, CircuitBreaker] = {}
 
-    def register(self,
-                 name: str,
-                 breaker: CircuitBreaker) -> CircuitBreaker:
-        """Register circuit breaker"""
+    def register(self, name: str, breaker: CircuitBreaker) -> CircuitBreaker:
         self.breakers[name] = breaker
         return breaker
 
     def get(self, name: str) -> Optional[CircuitBreaker]:
-        """Get circuit breaker by name"""
         return self.breakers.get(name)
 
     def get_all_metrics(self) -> dict:
-        """Get metrics for all circuit breakers"""
         return {
             name: breaker.get_metrics()
             for name, breaker in self.breakers.items()
         }
 
     def get_open_circuits(self) -> list[str]:
-        """Get names of open circuits"""
         return [
             name for name, breaker in self.breakers.items()
             if breaker.get_state() == CircuitState.OPEN
         ]
 
     def reset_all(self):
-        """Reset all circuit breakers to CLOSED"""
         for breaker in self.breakers.values():
             breaker._transition_to(CircuitState.CLOSED)

@@ -187,6 +187,9 @@ class AuditLogger:
         Returns:
             Created audit log entry
         """
+        resolved_details = details or {}
+        data_classification = resolved_details.get("data_classification", "public") if isinstance(resolved_details, dict) else "public"
+
         entry = AuditLogEntry(
             action=action,
             actor_id=actor_id,
@@ -200,8 +203,9 @@ class AuditLogger:
             source_ip=source_ip,
             result_message=result_message,
             error_details=error_details,
-            details=details or {},
+            details=resolved_details,
             is_sensitive=is_sensitive,
+            data_classification=data_classification,
             created_at=datetime.utcnow().isoformat()
         )
 
